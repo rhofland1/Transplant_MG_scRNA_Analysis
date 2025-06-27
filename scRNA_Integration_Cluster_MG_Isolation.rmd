@@ -1,0 +1,183 @@
+---
+title: "Seurat scRNA-seq Clustering Analysis"
+output: html_notebook
+---
+
+#Load Libraries
+
+library(Matrix)
+library(plyr)
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(simFrame)
+library(genefilter)
+library(methods)
+library(clustree)
+library(metap)
+
+#Load In Count Matricies
+setwd("D:/Rohan/Cluster_Data/Matrices/GFP_Matrices/Sample1_WT/sample_filtered_feature_bc_matrix")
+mat = as.data.frame(Read10X("."))
+
+#Check That Rownames are gene symbols and columns are Cell barcodes (Ex: AAACGGGAGGCTACGA)
+head(rownames(mat))
+head(colnames(mat))
+
+
+#Create Seurat Object 
+seu <- CreateSeuratObject(counts = mat, project = "Your Project Name", min.cells = 3, min.features = 0)
+
+#Optional to save working memory remove original count matrix object
+rm(mat)
+
+
+
+##% mitochondrial Genes out of all genes detected in each cell
+seu[["percent.mt"]] <- PercentageFeatureSet(seu, pattern="^MT-")
+##% Ribosomal Genes out of all genes detected in each cell
+seu[["percent.rb"]] <- PercentageFeatureSet(seu, pattern = "^RP[SL]")
+##% Hemoglobin genes out of all genes detected in each cell (can give an indication of red blood cell contamination).  
+seu[["percent.hb"]] <- PercentageFeatureSet(seu, pattern = "^HB[^(P)]")
+##Brain_Area (which sample dataset the cell originally came from)
+
+
+
+feats <- c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.rb", "percent.hb")
+
+#Vln Plots
+VlnPlot(seu, features = feats, pt.size = 0.1, ncol = 3)
+
+#Get Means of Metadata stat you want (ex)
+mean(seu$nFeature_RNA)
+mean(seu$nCount_RNA)
+mean(seu$percent.mt)
+mean(seu$percent.rb)
+mean(seu$percent.hb)
+
+#Scatterplots of nCount vs. nFeature (should be positive correlation) and nFeature_RNA vs. percent.mt (should be negative correlation)
+
+FeatureScatter(seu, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+FeatureScatter(seu, feature1 = "nFeature_RNA", feature2 = "percent.mt")
+
+#Filter Original Seurat Object (arbitrary)
+seu.filt <- subset(seu, subset = nFeature_RNA > 200 & nFeature_RNA < 5000 & percent.mt < 10)
+
+#Get Means of Metadata stat you want (ex)
+mean(seu.filt$nFeature_RNA)
+mean(seu.filt$nCount_RNA)
+mean(seu.filt$percent.mt)
+mean(seu.filt$percent.rb)
+mean(seu.filt$percent.hb)
+
+#Scatterplots of nCount vs. nFeature (should be positive correlation) and nFeature_RNA vs. percent.mt (should be negative correlation)
+
+FeatureScatter(seu.filt, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+FeatureScatter(seu.filt, feature1 = "nFeature_RNA", feature2 = "percent.mt")
+
+seu.filt <- All_merged
+
+
+seu.filt <- NormalizeData(seu.filt)
+seu.filt <- FindVariableFeatures(seu.filt)
+seu.filt <- ScaleData(seu.filt)
+seu.filt <- RunPCA(seu.filt)
+
+#Figure out How Many PCs capture the majority of variation in the data with elbow plot based on where the bend is (generally 20-50 depending on data complexity)
+ElbowPlot(seu.filt)
+
+#Assuming You pick 30 PCs 
+
+seu.filt <- RunUMAP(seu.filt, dims = 1:30, reduction.name = "umap")
+
+#Look At UMAP To See If you Like the way it looks and if you try repeating with different # of PCs
+DimPlot(seu.filt, reduction = "umap")
+FeaturePlot(seu.filt, features = c("Cd68", 'Aif1', 'Bdnf', 'egfp'))
+
+#Clustering
+
+
+seu.filt <- FindNeighbors(seu.filt, dims = 1:30)
+#higher resolutio = more clusters
+seu.filt <- FindClusters(seu.filt, resolution = 0.8)
+
+#Look at Clusters
+DimPlot(seu.filt, reduction = "umap", group.by = "seurat_clusters")
+
+#Find Cluster Markers
+cluster0.markers <- FindMarkers(seu.filt, ident.1 = 2, only.pos = TRUE)
+View(cluster0.markers)
+
+
+#Subset Cluster For Isolated Analysis
+micro <- seu.filt
+micro <- subset(seu.filt, Aif1 > 0 & Cd68 > 0 & Csf1r > 0 )
+DimPlot(WTs, reduction = "umap", group.by = "seurat_clusters")
+FeaturePlot(WTs, features = c("P2y12", 'SRGN', 'Tmem119', "Bdnf"))
+DimPlot(BDNFs, reduction = "umap", group.by = "seurat_clusters")
+FeaturePlot(BDNFs, features = c("P2y12", 'SRGN', 'Tmem119', "Bdnf"))
+DimPlot(NoVs, reduction = "umap", group.by = "seurat_clusters")
+FeaturePlot(NoVs, features = c("P2y12", 'SRGN', 'Tmem119', "Bdnf"))
+seu.filt <- SetIdent(seu.filt, value="Microglia_Type")
+seu.filt <- SetIdent(seu.filt, value = "seurat_clusters")
+cluster_all.markers <- FindAllMarkers(seu.filt, only.pos = TRUE)
+cluster_mg.markers <- FindAllMarkers(micro, only.pos=TRUE)
+
+
+#Save Seurat Object
+saveRDS(WTs, "D:/Rohan/Cluster_Data/Subsets/WT_all.rds")
+saveRDS(NoVs, "D:/Rohan/Cluster_Data/Subsets/NoV_all.rds")
+saveRDS(BDNFs, "D:/Rohan/Cluster_Data/Subsets/BDNF_all.rds")
+saveRDS(micro, "D:/Rohan/Cluster_Data/Subsets/all_seu.rds")
+
+#Save Markers List
+write.csv(cluster_all.markers, "D:/Rohan/Cluster_Data/Subsets/Allcells_merged.csv")
+write.csv(cluster_mg.markers, "D:/Rohan/Cluster_Data/Subsets/Allmgs_mg.markers.csv")
+
+seu.filt <- readRDS("D:/Rohan/Cluster_Data/Subsets/BDNF1.rds")
+micro <- subset(seu.filt, subset = Aif1 > 2.5)
+DimPlot(micro, reduction = "umap", group.by = "seurat_clusters")
+FeaturePlot(micro, features = c("Cd68", 'Aif1', 'Csf1r'))
+saveRDS(micro, "D:/Rohan/Cluster_Data/Subsets/BDNF1.rds")
+cluster_mg.markers <- FindAllMarkers(micro, only.pos=TRUE)
+write.csv(cluster_mg.markers, "D:/Rohan/Cluster_Data/Subsets/BDNF1_mg_change.markers.csv")
+
+seu.filt <- readRDS("D:/Rohan/Cluster_Data/Subsets/BDNF2_all.rds")
+micro <- subset(seu.filt, subset = Aif1 > 0)
+DimPlot(micro, reduction = "umap", group.by = "seurat_clusters")
+FeaturePlot(micro, features = c("Cd68", 'Aif1', 'Csf1r', 'Bdnf'))
+saveRDS(micro, "D:/Rohan/Cluster_Data/Subsets/BDNF2.rds")
+cluster_mg.markers <- FindAllMarkers(micro, only.pos=TRUE)
+write.csv(cluster_mg.markers, "D:/Rohan/Cluster_Data/Subsets/BDNF2_mg_change.markers.csv")
+
+seu.filt <- readRDS("D:/Rohan/Cluster_Data/Subsets/NoV1_all.rds")
+micro <- subset(seu.filt, subset = Aif1 > 2.5)
+DimPlot(micro, reduction = "umap", group.by = "seurat_clusters")
+FeaturePlot(micro, features = c("Cd68", 'Aif1', 'Csf1r'))
+saveRDS(micro, "D:/Rohan/Cluster_Data/Subsets/NoV1.rds")
+cluster_mg.markers <- FindAllMarkers(micro, only.pos=TRUE)
+write.csv(cluster_mg.markers, "D:/Rohan/Cluster_Data/Subsets/NoV1_mg_change.markers.csv")
+
+seu.filt <- readRDS("D:/Rohan/Cluster_Data/Subsets/NoV2_all.rds")
+micro <- subset(seu.filt, subset = Aif1 > 2.5)
+DimPlot(micro, reduction = "umap", group.by = "seurat_clusters")
+FeaturePlot(micro, features = c("Cd68", 'Aif1', 'Csf1r'))
+saveRDS(micro, "D:/Rohan/Cluster_Data/Subsets/NoV2.rds")
+cluster_mg.markers <- FindAllMarkers(micro, only.pos=TRUE)
+write.csv(cluster_mg.markers, "D:/Rohan/Cluster_Data/Subsets/NoV2_mg_change.markers.csv")
+
+seu.filt <- readRDS("D:/Rohan/Cluster_Data/Subsets/WT1_all.rds")
+micro <- subset(seu.filt, subset = Tmem119 > 1 & P2ry12 > 1 & Aif1 > 1)
+DimPlot(micro, reduction = "umap", group.by = "seurat_clusters")
+FeaturePlot(micro, features = c("Cd68", 'Aif1', 'Csf1r'))
+saveRDS(micro, "D:/Rohan/Cluster_Data/Subsets/WT1.rds")
+cluster_mg.markers <- FindAllMarkers(micro, only.pos=TRUE)
+write.csv(cluster_mg.markers, "D:/Rohan/Cluster_Data/Subsets/WT1_mg_change.markers.csv")
+
+seu.filt <- readRDS("D:/Rohan/Cluster_Data/Subsets/WT2_all.rds")
+micro <- subset(seu.filt, subset = Tmem119 > 2.5)
+DimPlot(micro, reduction = "umap", group.by = "seurat_clusters")
+FeaturePlot(micro, features = c("P2ry12", 'Aif1', 'Csf1r', 'Tmem119'))
+saveRDS(micro, "D:/Rohan/Cluster_Data/Subsets/WT2.rds")
+cluster_mg.markers <- FindAllMarkers(micro, only.pos=TRUE)
+write.csv(cluster_mg.markers, "D:/Rohan/Cluster_Data/Subsets/WT2_mg_change.markers.csv")

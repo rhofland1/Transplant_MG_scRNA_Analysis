@@ -1,0 +1,333 @@
+---
+title: "Seurat scRNA-seq Clustering Analysis"
+output: html_notebook
+---
+
+#Load Libraries
+
+```{r}
+library(Matrix)
+library(plyr)
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(simFrame)
+library(genefilter)
+library(methods)
+library(clustree)
+library(metap)
+```
+
+#Create Initial Seurat Data Object
+
+#Load In Count Matricies
+setwd("D:/Rohan/Cluster_Data/Matrices/WT4")
+mat = as.data.frame(Read10X("."))
+
+#Check That Rownames are gene symbols and columns are Cell barcodes (Ex: AAACGGGAGGCTACGA)
+head(rownames(mat))
+head(colnames(mat))
+
+
+#Create Seurat Object 
+seu <- CreateSeuratObject(counts = mat, do.scale=F, do.center=F, project = "Your Project Name", min.cells = 3, min.features = 0)
+
+#Optional to save working memory remove original count matrix object
+rm(mat)
+
+
+
+##% mitochondrial Genes out of all genes detected in each cell
+seu[["percent.mt"]] <- PercentageFeatureSet(seu[, pattern = "^MT-")
+##% Ribosomal Genes out of all genes detected in each cell
+seu[[["percent.rb"]] <- PercentageFeatureSet(seu[, pattern = "^RP[SL]")
+##% Hemoglobin genes out of all genes detected in each cell (can give an indication of red blood cell contamination).  
+seu[[["percent.hb"]] <- PercentageFeatureSet(seu[, pattern = "^HB[^(P)]")
+##Brain_Area (which sample dataset the cell originally came from)
+
+
+#QC and Filtering
+#Before Filtering
+
+feats <- c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.rb", "percent.hb")
+
+#Vln Plots
+VlnPlot(seu, features = feats, pt.size = 0.1, ncol = 3)
+
+#Get Means of Metadata stat you want (ex)
+mean(seu$nFeature_RNA)
+mean(seu$nCount_RNA)
+mean(seu$percent.mt)
+mean(seu$percent.rb)
+mean(seu$percent.hb)
+
+#Scatterplots of nCount vs. nFeature (should be positive correlation) and nFeature_RNA vs. percent.mt (should be negative correlation)
+
+FeatureScatter(seu, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+FeatureScatter(seu, feature1 = "nFeature_RNA", feature2 = "percent.mt")
+
+#Filter Original Seurat Object (arbitrary)
+seu.filt <- subset(seu, subset = nFeature_RNA > 200 & nFeature_RNA < 5000 & percent.mt < 10)
+
+
+
+#After Filtering###############
+
+#Vln Plots
+VlnPlot(seu.filt, group.by = "Brain_Area", features = feats, pt.size = 0.1, ncol = 3)
+
+#Get Means of Metadata stat you want (ex)
+mean(seu.filt$nFeature_RNA)
+mean(seu.filt$nCount_RNA)
+mean(seu.filt$percent.mt)
+mean(seu.filt$percent.rb)
+mean(seu.filt$percent.hb)
+
+#Scatterplots of nCount vs. nFeature (should be positive correlation) and nFeature_RNA vs. percent.mt (should be negative correlation)
+
+FeatureScatter(seu.filt, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+FeatureScatter(seu.filt, feature1 = "nFeature_RNA", feature2 = "percent.mt")
+
+
+
+seu.filt <- readRDS("D:/Rohan/hof_mg_newtags.rds")
+
+seu.filt <- NormalizeData(seu.filt)
+seu.filt <- FindVariableFeatures(seu.filt)
+seu.filt <- ScaleData(seu.filt)
+seu.filt <- RunPCA(seu.filt)
+
+#Figure out How Many PCs capture the majority of variation in the data with elbow plot based on where the bend is (generally 20-50 depending on data complexity)
+ElbowPlot(seu.filt)
+
+#Assuming You pick 30 PCs 
+RunUMAP(seu.filt, dims = 1:30, reduction.name = "umap")
+
+#Look At UMAP To See If you Like the way it looks and if you try repeating with different # of PCs
+DimPlot(seu.filt, reduction = "umap", label = TRUE)
+FeaturePlot(seu.filt, features = c("Bdnf"))
+
+
+pbmc <- FindNeighbors(seu.filt, dims = 1:30)
+#higher resolutio = more clusters
+pbmc <- FindClusters(seu.filt, resolution = 0.7)
+
+#SC_Type
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R")
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
+db_ <- "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+tissue <- "Immune system"
+gs_list <- gene_sets_prepare(db_, tissue)
+# check Seurat object version (scRNA-seq matrix extracted differently in Seurat v4/v5)
+seurat_package_v5 <- isFALSE('counts' %in% names(attributes(pbmc[["RNA"]])));
+print(sprintf("Seurat object %s is used", ifelse(seurat_package_v5, "v5", "v4")))
+
+# extract scaled scRNA-seq matrix
+scRNAseqData_scaled <- if (seurat_package_v5) as.matrix(pbmc[["RNA"]]$scale.data) else as.matrix(pbmc[["RNA"]]@scale.data)
+
+# run ScType
+es.max <- sctype_score(scRNAseqData = scRNAseqData_scaled, scaled = TRUE, gs = gs_list$gs_positive, gs2 = gs_list$gs_negative)
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. For raw (unscaled) count matrix set scaled = FALSE
+# When using Seurat, we use "RNA" slot with 'scale.data' by default. Please change "RNA" to "SCT" for sctransform-normalized data,
+# or to "integrated" for joint dataset analysis. To apply sctype with unscaled data, use e.g. pbmc[["RNA"]]$counts or pbmc[["RNA"]]@counts, with scaled set to FALSE.
+
+# merge by cluster
+
+cL_resutls <- do.call("rbind", lapply(unique(seu.filt@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(seu.filt@meta.data[seu.filt@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(seu.filt@meta.data$seurat_clusters==cl)), 10)
+}))
+sctype_scores <- cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)
+
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] <- "Unknown"
+print(sctype_scores[,1:3])
+
+seu.filt@meta.data$sctype_classification = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  seu.filt@meta.data$sctype_classification[seu.filt@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+seu.filt <- subset(seu.filt, subset = sctype_classification == "seu.filtglial cells")
+
+saveRDS(seu.filt, "D:/Rohan/Cluster_Data/Matrices/Processed_Matrices/WT4.rds")
+saveRDS(seu.filt, "D:/Rohan/Cluster_Data/Matrices/Processed_Matrices/WT4_mg.rds")
+rm(list = ls())
+
+
+#Compare Cronk to DEG List
+
+# Install and load biomaRt package if not already installed
+if (!requireNamespace("biomaRt", quietly = TRUE)) {
+  install.packages("biomaRt")
+}
+
+library(Seurat)
+
+# Assume seu.filtect is your existing Seurat object
+# Run FindMarkers to identify differentially expressed genes
+# Example: Comparing Cluster 1 vs Cluster 2
+
+res <- WhichCells(seu.filt, idents = 3)
+wt <- WhichCells(seu.filt, idents = c(0,2))
+tmg <- WhichCells(seu.filt, idents = c(6, 7))
+
+seu.filt$mouse <- "Other"
+seu.filt$mouse[res] <- "R-MG"
+seu.filt$mouse[wt] <- "E-MG"
+seu.filt$mouse[tmg] <- "T-MG"
+
+seu.filt <- SetIdent(seu.filt, value = "mouse")
+Host <- FindMarkers(seu.filt, ident.1 = "R-MG", ident.2 = "E-MG")
+Transplant <- FindMarkers(seu.filt, ident.1 = "T-MG", ident.2 = "E-MG")
+
+# Get average expression values for all genes in both clusters
+average_expression <- AggregateExpression(seu.filt, return.seurat = FALSE)
+
+# Extract average expression values for genes in the markers list
+avg_expr_cluster1 <- average_expression$RNA["R-MG"] # Adjusted for your assay and cluster name
+avg_expr_cluster2 <- average_expression$RNA["T-MG"]
+
+# Add average expression as new columns to the markers dataframe
+Host$avg_expression <- avg_expr_cluster1[rownames(Host)]
+Transplant$avg_expression <- avg_expr_cluster2[rownames(Transplant)]
+
+H_df <- as.data.frame(Host)
+T_df <- as.data.frame(Transplant)
+Cronk <- read.csv("C:/Users/hebertlab-admin/AppData/Local/Temp/082b2473-3d2c-4fe4-ab0f-bad070e3cdfd_JEM_20180247_TablesS1andS2 (1).zip.dfd/Cx3cr1_Cre.csv")
+
+colnames(Cronk) <- Cronk[2,]
+Cronk <- Cronk[c(-1, -2), ]
+Cronk <- Cronk[, c(-15, -14, -13, -12, -11)]
+# Print the data with the new GeneSymbols column
+print(Cronk)
+
+
+Cronk_df <- as.data.frame(Cronk)
+
+
+
+library(biomaRt)
+
+# Connect to the Ensembl database for mouse genes
+ensembl <- useMart("ensembl", dataset = "mmusculus_gene_ensembl")
+
+
+# Retrieve gene symbols from Ensembl
+ensembl_ids <- Cronk[, "Ensembl"]
+gene_info <- getBM(
+  attributes = c('ensembl_gene_id', 'mgi_symbol'), 
+  filters = 'ensembl_gene_id', 
+  values = ensembl_ids, 
+  mart = ensembl
+)
+
+# Match Ensembl IDs to gene_info
+match_indices <- match(ensembl_ids, gene_info$ensembl_gene_id)
+gene_symbols <- gene_info$mgi_symbol[match_indices]
+
+# Determine valid mappings and set gene symbols to a new column
+Cronk$GeneSymbols <- ifelse(!is.na(gene_symbols) & gene_symbols != "", gene_symbols, ensembl_ids)
+
+# Convert back to a matrix if needed, with 'GeneID' as row names
+rownames(merged_df) <- merged_df$GeneID
+merged_df$GeneID <- NULL
+
+# If you want the result explicitly as a matrix, do the conversion
+merged_matrix <- as.matrix(merged_df)
+
+# Print the merged data frame or matrix
+print(merged_df)
+
+transplant_avg <- average_expression$RNA[,"T-MG"]
+T_df$avg_expression <- transplant_avg[rownames(T_df)]
+host_avg <- average_expression$RNA[,"R-MG"]
+H_df$avg_expression <- host_avg[rownames(H_df)]
+
+# Add row names as a new column for merging purposes
+H_df$GeneID <- rownames(H_df)
+T_df$GeneID <- rownames(T_df)
+
+# Merge data frames on the 'GeneID' column
+merged_df <- merge(H_df, T_df, by = "GeneID", all = TRUE)
+
+agg_exp_v_cronk_df <- merge(Cronk_df, merged_df, by.x = "Symbol", by.y = "GeneID", all.x = TRUE)
+
+cols_to_remove <- sapply(agg_exp_v_cronk_df, function(col) all(is.na(col)))
+
+# Remove those columns from agg_exp_v_cronk_df
+agg_exp_v_cronk_df_cleaned <- agg_exp_v_cronk_df[, !cols_to_remove]
+
+# Print the cleaned data frame
+print(agg_exp_v_cronk_df_cleaned)
+
+# Remove any rows with any NA values
+result_df_final <- na.omit(agg_exp_v_cronk_df_cleaned)
+
+# Alternatively, using complete.cases()
+# result_df_final <- result_df_cleaned[complete.cases(result_df_cleaned), ]
+
+# Print the cleaned data frame
+print(result_df_final)
+
+seu.filt <- subset(seu.filt, subset = mouse == c('T-MG', "R-MG", 'E-MG'))
+
+BAM_genes <- c(
+  "Lilra5", "H2-Aa", "Mg12", "Mrc1", "Clec10a", "Gas6", "Ccr1", "Folr2",
+  "Cd74", "H2-Eb1", "Axl", "Ccr2", "P2rx7", "Cd14", "Klra2", "Ms4a6c", 
+  "F13a1", "Arg1", "Snx2", "Snx6", "Fcgr1", "Clec4n", "Adgre1", "Cd36",
+  "Tgfbi", "Egf17", "H2-Ab1", "Dab2", "Cd163", "Lyve1",
+  "Lyz2", "Ifitm2", "Cybb", "Mndal", "Ms4a7", "Aldh2", "Ifitm3",
+  "Ifi2712a", "Clec4a1", "Plaur", "Il1a", "Cst7", "Nav3", "Sall1", "Hspa1a",
+  "Ttr", "Hspa1b", "Lilra5", "Il1b", "S100a6", "Cfp", "Cela1", "Ccl8", "Ccl24", "Tslp"
+)
+
+DAM_genes <- c(
+  "Lpl", "Lgi2", "Siglec1", "Fxyd6", "Baiap212", "Etl4", "Axl", "St14",
+  "R3hcc1", "Ank", "Mamdc2", "Csf1", "Il1b", "Rab7b", "Ccl3", "Tcf19",
+  "H2-Q7", "Itga5", "Igf1", "Lmbrd2", "Tmem8", "Cst7", "4632427E13Rik",
+  "Got1", "Sic1a2", "Tmem154", "Gpr65", "Psat1", "Egr2", "Fam20c", "Lyz2",
+  "Spp1", "Cox6a2", "Arhgap26", "Nceh1", "Gpnmb", "Ifi2712a", "Mettl15",
+  "Ch25h", "Capg", "Itgax", "Zfp189", "Birc5", "Ero1lb", "Ildr2", "Арое",
+  "Ifit2", "Zfp692", "Nlrc5", "Pycr", "Cdca8", "Cc14"
+)
+
+
+DAM_genes_unique <- setdiff(DAM_genes, BAM_genes)
+
+
+average_expression <- AverageExpression(seu.filt, group.by = "mouse")
+expr_data <- average_expression$RNA
+
+# Plot the dot plot for the filtered and intersected genes
+dot_plot <- DotPlot(seu.filt, features = intersect(BAM_genes, rownames(seu.filt)), group.by = "mouse", scale = FALSE) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  labs(title = "Filtered Genes from BAM_genes and E-MG Expression")
+
+# Print the plot
+print(dot_plot)
+# Calculate average expression per group
+average_expression <- AverageExpression(seu.filt, group.by = "mouse")
+expr_data <- average_expression$RNA
+
+# Plot the dot plot for the filtered and intersected genes
+dot_plot <- DotPlot(seu.filt, features = intersect(DAM_genes, rownames(seu.filt)), group.by = "mouse", scale = FALSE) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  labs(title = "Filtered Genes from DAM_genes")
+
+# Print the plot
+print(dot_plot)
+# Calculate average expression per group
+average_expression <- AverageExpression(seu.filt, group.by = "mouse")
+expr_data <- average_expression$RNA
+
+# Plot the dot plot for the filtered and intersected genes
+dot_plot <- DotPlot(seu.filt, features = intersect(DAM_genes_unique, rownames(seu.filt)), group.by = "mouse", scale = FALSE) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  labs(title = "Filtered Genes from DAM_genes Unique")
+
+# Print the plot
+print(dot_plot)
